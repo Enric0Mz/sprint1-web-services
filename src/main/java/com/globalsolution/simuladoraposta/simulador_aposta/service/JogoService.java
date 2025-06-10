@@ -10,6 +10,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode; // Import RoundingMode
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Random;
@@ -28,16 +29,19 @@ public class JogoService {
 
     private final Random random = new Random();
 
-    // Probabilidades (RF012, RF013, RF014, RF015)
     private static final double PROBABILIDADE_PERDA = 0.95; // 95%
     private static final double PROBABILIDADE_PEQUENO_GANHO = 0.04; // 4% (1:1)
     private static final double PROBABILIDADE_MEDIO_GANHO = 0.009; // 0.9% (2:1)
     private static final double PROBABILIDADE_GRANDE_GANHO = 0.001; // 0.1% (5:1)
 
+    private static final int DECIMAL_SCALE = 2;
+    private static final RoundingMode ROUNDING_MODE = RoundingMode.HALF_UP;
+
     @Transactional
     public ApostaResult jogarTigrinho(Long usuarioId, BigDecimal valorApostado) {
         Usuario usuario = usuarioService.buscarUsuarioPorId(usuarioId);
 
+        // Input validation (already good)
         if (usuario.getSaldo().compareTo(valorApostado) < 0) {
             throw new RuntimeException("Saldo insuficiente para esta aposta!");
         }
@@ -51,41 +55,47 @@ public class JogoService {
 
         usuarioService.atualizarSaldo(usuarioId, valorApostado.negate());
 
-        BigDecimal valorGanhoOuPerdaLiquido = valorApostado.negate();
+        BigDecimal valorRecebidoNoGanho = BigDecimal.ZERO; // Total amount received if winning
+        BigDecimal valorGanhoOuPerdaLiquido = valorApostado.negate(); // Net gain/loss for Aposta record
         String resultadoTexto = "PERDA";
 
         double sorteio = random.nextDouble();
 
-        if (sorteio < PROBABILIDADE_GRANDE_GANHO) {
-            valorGanhoOuPerdaLiquido = valorApostado.multiply(new BigDecimal("4.0"));
+        if (sorteio < PROBABILIDADE_GRANDE_GANHO) { // JACKPOT (5:1)
+            valorRecebidoNoGanho = valorApostado.multiply(new BigDecimal("5.0")).setScale(DECIMAL_SCALE, ROUNDING_MODE);
             resultadoTexto = "GANHO_JACKPOT";
-        } else if (sorteio < (PROBABILIDADE_GRANDE_GANHO + PROBABILIDADE_MEDIO_GANHO)) {
-            valorGanhoOuPerdaLiquido = valorApostado;
+        } else if (sorteio < (PROBABILIDADE_GRANDE_GANHO + PROBABILIDADE_MEDIO_GANHO)) { // MEDIUM (2:1)
+            valorRecebidoNoGanho = valorApostado.multiply(new BigDecimal("2.0")).setScale(DECIMAL_SCALE, ROUNDING_MODE);
             resultadoTexto = "GANHO_MEDIO";
-        } else if (sorteio < (PROBABILIDADE_GRANDE_GANHO + PROBABILIDADE_MEDIO_GANHO + PROBABILIDADE_PEQUENO_GANHO)) {
-            valorGanhoOuPerdaLiquido = BigDecimal.ZERO;
+        } else if (sorteio < (PROBABILIDADE_GRANDE_GANHO + PROBABILIDADE_MEDIO_GANHO + PROBABILIDADE_PEQUENO_GANHO)) { // SMALL (1:1)
+            valorRecebidoNoGanho = valorApostado.multiply(new BigDecimal("1.0")).setScale(DECIMAL_SCALE, ROUNDING_MODE);
             resultadoTexto = "GANHO_PEQUENO";
         }
 
-        if (valorGanhoOuPerdaLiquido.compareTo(BigDecimal.ZERO) > 0) {
-            usuarioService.atualizarSaldo(usuarioId, valorGanhoOuPerdaLiquido);
+        valorGanhoOuPerdaLiquido = valorRecebidoNoGanho.subtract(valorApostado).setScale(DECIMAL_SCALE, ROUNDING_MODE);
+
+
+        if (valorRecebidoNoGanho.compareTo(BigDecimal.ZERO) > 0) {
+            usuarioService.atualizarSaldo(usuarioId, valorRecebidoNoGanho);
         }
 
         usuario = usuarioService.buscarUsuarioPorId(usuarioId);
 
+
         Aposta aposta = new Aposta();
         aposta.setUsuario(usuario);
-        aposta.setValorApostado(valorApostado);
+        aposta.setValorApostado(valorApostado.setScale(DECIMAL_SCALE, ROUNDING_MODE));
         aposta.setResultado(resultadoTexto);
         aposta.setValorGanhoPerda(valorGanhoOuPerdaLiquido);
-        aposta.setSaldoAposAposta(usuario.getSaldo());
+        aposta.setSaldoAposAposta(usuario.getSaldo().setScale(DECIMAL_SCALE, ROUNDING_MODE));
         aposta.setDataAposta(LocalDateTime.now());
         aposta.setTipoAposta("TIGRINHO");
+
         apostaRepository.save(aposta);
 
         List<SugestaoInvestimentoDTO> sugestoesInvestimento = null;
         if ("PERDA".equals(resultadoTexto)) {
-            sugestoesInvestimento = investimentoService.gerarSugestoes(valorApostado, usuarioId); // CORREÇÃO AQUI
+            sugestoesInvestimento = investimentoService.gerarSugestoes(valorApostado.setScale(DECIMAL_SCALE, ROUNDING_MODE), usuarioId);
         }
 
         return new ApostaResult(aposta, sugestoesInvestimento);
